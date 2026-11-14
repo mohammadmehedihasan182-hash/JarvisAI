@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#050A14</color>
+    <color name="bg_panel">#0B1526</color>
+    <color name="neon">#00E5FF</color>
+    <color name="neon_dim">#00707E</color>
+    <color name="accent">#7C4DFF</color>
+    <color name="text_main">#E8F6FF</color>
+    <color name="text_dim">#8FB3C7</color>
+    <color name="bubble_ai">#12233D</color>
+    <color name="bubble_user">#00586B</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+</resources>

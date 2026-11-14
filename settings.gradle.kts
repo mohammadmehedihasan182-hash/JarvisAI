@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "JarvisAI"
+rootProject.name = "JARVIS-AI"
 include(":app")

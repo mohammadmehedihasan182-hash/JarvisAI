@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS AI</string>
+    <string name="nav_home">হোম</string>
+    <string name="nav_chat">চ্যাট</string>
+    <string name="nav_schedule">শিডিউল</string>
+    <string name="nav_settings">সেটিংস</string>
+    <string name="listening">শুনছি...</string>
+    <string name="tap_to_talk">বলতে মাইকে চাপ দিন</string>
+</resources>
