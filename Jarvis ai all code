@@ -1,0 +1,2679 @@
+JARVIS AI - ALL CODE IN ONE FILE
+প্রতিটা অংশের আগে FILE: নাম দেওয়া আছে.
+
+============================================================
+FILE: JARVIS-AI/app/build.gradle.kts
+============================================================
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.doodlejoy.jarvis"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.doodlejoy.jarvis"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+
+        // NOTE (Security rule from spec): NO API key is stored in the app.
+        // Free AI chat goes through YOUR server endpoint below; the key stays on the server.
+        buildConfigField("String", "AI_SERVER_URL", "\"https://your-server.example.com/chat\"")
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    buildFeatures {
+        buildConfig = true
+        viewBinding = true
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/proguard-rules.pro
+============================================================
+# JARVIS AI — no custom ProGuard rules needed for v1.
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/AndroidManifest.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Voice -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Calls / SMS (always asked first in the app) -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Calendar / schedule -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Alarms / reminders / notifications -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name=".JarvisApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Jarvis"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Wake word foreground service: permanent notification while listening -->
+        <service
+            android:name=".voice.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Alarm / reminder receiver -->
+        <receiver
+            android:name=".core.AlarmReceiver"
+            android:exported="false" />
+
+        <!-- Incoming / missed call receiver -->
+        <receiver
+            android:name=".call.CallReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Re-schedule reminders after reboot -->
+        <receiver
+            android:name=".core.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/JarvisApp.kt
+============================================================
+package com.doodlejoy.jarvis
+
+import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import com.doodlejoy.jarvis.voice.SpeechManager
+
+/**
+ * Holds one shared SpeechManager (speech recognition + TTS) so Activities,
+ * the wake-word service and the call receiver can all speak/listen
+ * through the same engine.
+ */
+class JarvisApp : Application() {
+
+    lateinit var speech: SpeechManager
+        private set
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        speech = SpeechManager(this)
+        createChannels()
+    }
+
+    private fun createChannels() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_LISTENING, "JARVIS Listening", NotificationManager.IMPORTANCE_LOW)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ALERTS, "JARVIS Alerts", NotificationManager.IMPORTANCE_HIGH)
+        )
+    }
+
+    companion object {
+        const val CHANNEL_LISTENING = "jarvis_listening"
+        const val CHANNEL_ALERTS = "jarvis_alerts"
+        lateinit var instance: JarvisApp
+            private set
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/MainActivity.kt
+============================================================
+package com.doodlejoy.jarvis
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.Fragment
+import com.doodlejoy.jarvis.databinding.ActivityMainBinding
+import com.doodlejoy.jarvis.ui.ChatFragment
+import com.doodlejoy.jarvis.ui.HomeFragment
+import com.doodlejoy.jarvis.ui.ScheduleFragment
+import com.doodlejoy.jarvis.ui.SettingsFragment
+
+/**
+ * Bottom navigation (spec section 1): হোম, চ্যাট, শিডিউল, সেটিংস.
+ * Also asks for all runtime permissions once, up front.
+ */
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        requestAllPermissions()
+
+        if (savedInstanceState == null) {
+            show(HomeFragment())
+        }
+        binding.bottomNav.setOnItemSelectedListener { item ->
+            when (item.itemId) {
+                R.id.nav_home -> show(HomeFragment())
+                R.id.nav_chat -> show(ChatFragment())
+                R.id.nav_schedule -> show(ScheduleFragment())
+                R.id.nav_settings -> show(SettingsFragment())
+            }
+            true
+        }
+
+        // Woken by the wake word? Start conversation mode on the Home tab.
+        if (intent?.getBooleanExtra(EXTRA_START_CONVERSATION, false) == true) {
+            binding.bottomNav.selectedItemId = R.id.nav_home
+        }
+    }
+
+    private fun show(fragment: Fragment) {
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.fragmentContainer, fragment)
+            .commit()
+    }
+
+    /** Called by HomeFragment after a wake-word wake-up. */
+    fun startConversationFromWakeWord() {
+        val home = supportFragmentManager.findFragmentById(R.id.fragmentContainer) as? HomeFragment
+        home?.startConversationMode()
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_START_CONVERSATION, false)) {
+            binding.bottomNav.selectedItemId = R.id.nav_home
+            startConversationFromWakeWord()
+        }
+    }
+
+    private fun requestAllPermissions() {
+        val wanted = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.READ_CALENDAR
+        )
+        if (Build.VERSION.SDK_INT >= 33) wanted.add(Manifest.permission.POST_NOTIFICATIONS)
+        val missing = wanted.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), 42)
+        }
+    }
+
+    companion object {
+        const val EXTRA_START_CONVERSATION = "start_conversation"
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ai/AiChatClient.kt
+============================================================
+package com.doodlejoy.jarvis.ai
+
+import com.doodlejoy.jarvis.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Free-form AI chat (spec sections 2 & 6).
+ *
+ * SECURITY BY DESIGN: the API key is NOT in the app and NOT on the phone.
+ * The app only talks to YOUR server (BuildConfig.AI_SERVER_URL), and the
+ * server holds the key and calls the AI provider. Example server contract:
+ *
+ *   POST /chat   { "message": "...", "language": "bn" }
+ *   -> 200       { "reply": "..." }
+ *
+ * If the server is not set up yet, ask() returns null and the built-in
+ * AssistantBrain answers with its local rules instead.
+ */
+object AiChatClient {
+
+    suspend fun ask(message: String, language: String): String? = withContext(Dispatchers.IO) {
+        try {
+            if (BuildConfig.AI_SERVER_URL.contains("your-server")) return@withContext null
+            val conn = URL(BuildConfig.AI_SERVER_URL).openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.doOutput = true
+            val body = JSONObject().put("message", message).put("language", language).toString()
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode != 200) return@withContext null
+            val text = conn.inputStream.bufferedReader().readText()
+            JSONObject(text).optString("reply").ifBlank { null }
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/call/CallReceiver.kt
+============================================================
+package com.doodlejoy.jarvis.call
+
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.provider.CallLog
+import android.telephony.TelephonyManager
+import androidx.core.app.NotificationCompat
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.MainActivity
+import com.doodlejoy.jarvis.R
+import com.doodlejoy.jarvis.core.CallSmsHelper
+
+/**
+ * Call management (spec section 5):
+ *  - Incoming call: announce WHO is calling out loud ("রহিম ফোন করেছেন, ধরবেন?")
+ *  - Missed call: notification reminder + spoken reminder when the app runs.
+ *
+ * Note: Android does not let a normal app answer/decline calls by voice —
+ * JARVIS announces and asks, the user taps the phone's own answer button.
+ * (Talking TO the caller as AI is excluded for now, per spec.)
+ */
+class CallReceiver : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+        val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
+        val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+
+        when (state) {
+            TelephonyManager.EXTRA_STATE_RINGING -> {
+                if (!number.isNullOrBlank()) {
+                    lastRingingNumber = number
+                    val name = CallSmsHelper.nameForNumber(context, number)
+                    val who = name ?: number
+                    speak(context, "$who ফোন করেছেন। ধরবেন?")
+                }
+            }
+            TelephonyManager.EXTRA_STATE_IDLE -> {
+                // If it rang and was never picked up (last state was RINGING), it is a missed call.
+                val missed = lastRingingNumber
+                if (missed != null && wasRinging) {
+                    lastRingingNumber = null
+                    notifyMissed(context, missed)
+                }
+                wasRinging = false
+            }
+            TelephonyManager.EXTRA_STATE_OFFHOOK -> {
+                wasRinging = false
+                lastRingingNumber = null
+            }
+        }
+        if (state == TelephonyManager.EXTRA_STATE_RINGING) wasRinging = true
+    }
+
+    private fun notifyMissed(context: Context, number: String) {
+        val name = CallSmsHelper.nameForNumber(context, number)
+        val who = name ?: number
+        val text = "আপনার একটি মিসড কল আছে: $who"
+        val openApp = PendingIntent.getActivity(
+            context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, JarvisApp.CHANNEL_ALERTS)
+            .setContentTitle("মিসড কল")
+            .setContentText(text)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        context.getSystemService(android.app.NotificationManager::class.java)
+            .notify(2001, notification)
+        speak(context, text)
+    }
+
+    private fun speak(context: Context, text: String) {
+        try {
+            (context.applicationContext as JarvisApp).speech.speak(text)
+        } catch (_: Exception) {
+            // Process/TTS not ready — the system call UI still shows the call normally.
+        }
+    }
+
+    companion object {
+        @Volatile private var lastRingingNumber: String? = null
+        @Volatile private var wasRinging: Boolean = false
+
+        /** Latest missed call from the system call log (for "মিসড কল আছে?" questions). */
+        fun latestMissedCall(context: Context): String? {
+            return try {
+                context.contentResolver.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME),
+                    CallLog.Calls.TYPE + " = ?",
+                    arrayOf(CallLog.Calls.MISSED_TYPE.toString()),
+                    CallLog.Calls.DATE + " DESC"
+                )?.use { c ->
+                    if (c.moveToFirst()) c.getString(1) ?: c.getString(0) else null
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/AlarmReceiver.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import androidx.core.app.NotificationCompat
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.MainActivity
+import com.doodlejoy.jarvis.R
+
+/** Fires alarms/reminders: shows a notification AND speaks the message out loud. */
+class AlarmReceiver : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val title = intent.getStringExtra(ReminderScheduler.EXTRA_TITLE) ?: "JARVIS"
+        val message = intent.getStringExtra(ReminderScheduler.EXTRA_MESSAGE) ?: ""
+
+        val openApp = PendingIntent.getActivity(
+            context, 0,
+            Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, JarvisApp.CHANNEL_ALERTS)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        val nm = context.getSystemService(android.app.NotificationManager::class.java)
+        nm.notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
+
+        // Speak it (works when the process is alive; the notification always shows).
+        try {
+            JarvisApp.instance.speech.speak("মনে করিয়ে দিচ্ছি: $message")
+        } catch (_: Exception) {
+            // App process was killed; notification above still delivered the reminder.
+        }
+    }
+}
+
+/** After a reboot, alarms are wiped by Android — re-schedule every future task. */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        val store = ScheduleStore(context)
+        store.all()
+            .filter { it.timeMillis > System.currentTimeMillis() && !it.done }
+            .forEach { ReminderScheduler.scheduleTask(context, it) }
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/AssistantBrain.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.content.Context
+import com.doodlejoy.jarvis.call.CallReceiver
+import java.util.Calendar
+
+/**
+ * The command brain (spec sections 2–5).
+ * Understands Bengali + English commands and returns one of:
+ *  - Reply:            just say it.
+ *  - AskConfirmation:  say the question and WAIT. The pending action runs only
+ *                      if the very next thing the user says is "হ্যাঁ"/"yes".
+ *                      (Security rule: sensitive work always confirms first.)
+ *  - NeedsAi:          not a built-in command — send to AiChatClient (server AI).
+ *
+ * JARVIS does nothing the user did not command (spec section 6).
+ */
+class AssistantBrain(private val context: Context) {
+
+    private val prefs = Prefs(context)
+    private val store = ScheduleStore(context)
+    private var pendingAction: (() -> String)? = null
+
+    sealed class Outcome {
+        data class Reply(val text: String) : Outcome()
+        data class AskConfirmation(val question: String) : Outcome()
+        object NeedsAi : Outcome()
+    }
+
+    private val bn get() = prefs.language != "en"
+
+    fun handle(rawInput: String): Outcome {
+        val input = rawInput.trim()
+        val lower = input.lowercase()
+        val norm = toEnglishDigits(lower)
+
+        // 1) A confirmation is pending? Only yes/no matters now.
+        if (pendingAction != null) {
+            return when {
+                isYes(lower) -> {
+                    val action = pendingAction!!
+                    pendingAction = null
+                    Outcome.Reply(action())
+                }
+                isNo(lower) -> {
+                    pendingAction = null
+                    Outcome.Reply(if (bn) "ঠিক আছে, বাতিল করে দিলাম।" else "Okay, cancelled.")
+                }
+                else -> {
+                    pendingAction = null
+                    handleFresh(norm, lower, input) // treat as a new command
+                }
+            }
+        }
+        return handleFresh(norm, lower, input)
+    }
+
+    private fun handleFresh(norm: String, lower: String, original: String): Outcome {
+        // ---- Greetings / identity ----
+        if (lower.containsAny("আসসালামু", "হ্যালো", "hello", "hi jarvis", "হাই")) {
+            val name = prefs.userName
+            return Outcome.Reply(
+                if (bn) "ওয়ালাইকুম আসসালাম${if (name.isNotEmpty()) " $name" else ""}! আমি জার্ভিস। কী করতে পারি?"
+                else "Hello${if (name.isNotEmpty()) " $name" else ""}! I am JARVIS. How can I help?"
+            )
+        }
+        if (lower.containsAny("তুমি কে", "তোমার নাম", "who are you", "your name")) {
+            return Outcome.Reply(if (bn) "আমি জার্ভিস, আপনার ভয়েস অ্যাসিস্ট্যান্ট।" else "I am JARVIS, your voice assistant.")
+        }
+
+        // ---- Remember my name ----
+        extractAfter(original, listOf("আমার নাম", "আমি "))?.let { name ->
+            if (lower.contains("নাম")) {
+                prefs.userName = name.trim()
+                return Outcome.Reply(if (bn) "মনে রাখলাম। আপনার নাম ${prefs.userName}।" else "I will remember that, ${prefs.userName}.")
+            }
+        }
+
+        // ---- Phone info ----
+        if (lower.containsAny("ব্যাটারি", "battery", "চার্জ কত")) {
+            val p = PhoneInfo.batteryPercent(context)
+            return Outcome.Reply(if (bn) "ব্যাটারি $p%${if (PhoneInfo.isCharging(context)) ", চার্জ হচ্ছে" else ""}।" else "Battery is $p%.")
+        }
+        if (lower.containsAny("স্টোরেজ", "storage")) {
+            return Outcome.Reply((if (bn) "স্টোরেজ: " else "Storage: ") + PhoneInfo.storageText())
+        }
+        if (lower.containsAny("সময় কত", "কয়টা বাজে", "what time", "the time")) {
+            return Outcome.Reply((if (bn) "এখন সময় " else "It is ") + PhoneInfo.nowText(bn))
+        }
+        if (lower.containsAny("ফোনের তথ্য", "phone info", "device info")) {
+            return Outcome.Reply(PhoneInfo.summary(context, bn))
+        }
+
+        // ---- Alarm: "সকাল ৭টায় অ্যালার্ম দাও" / "set alarm at 7" ----
+        if (lower.containsAny("অ্যালার্ম", "এলার্ম", "alarm")) {
+            val t = parseTime(norm) ?: return Outcome.Reply(
+                if (bn) "কোন সময়ে অ্যালার্ম দেব? যেমন বলুন: সকাল ৭টায় অ্যালার্ম দাও।" else "At what time? Say: set alarm at 7 AM."
+            )
+            val at = nextOccurrence(t.first, t.second)
+            ReminderScheduler.schedule(context, (at % Int.MAX_VALUE).toInt(), at, "অ্যালার্ম", "অ্যালার্ম বাজছে!", "alarm")
+            return Outcome.Reply(if (bn) "অ্যালার্ম সেট করে দিলাম: ${formatTime(t.first, t.second)}।" else "Alarm set for ${formatTime(t.first, t.second)}.")
+        }
+
+        // ---- Reminder in X minutes: "১০ মিনিট পর ওষুধ খেতে মনে করিয়ে দাও" ----
+        if (lower.containsAny("মনে করিয়ে", "রিমাইন্ডার", "remind")) {
+            val minutes = Regex("(\\d+)\\s*(মিনিট|minute|min)").find(norm)?.groupValues?.get(1)?.toIntOrNull()
+            val hours = Regex("(\\d+)\\s*(ঘণ্টা|hour)").find(norm)?.groupValues?.get(1)?.toIntOrNull()
+            val delayMin = (hours ?: 0) * 60 + (minutes ?: 0)
+            val what = original
+                .replace(Regex("(?i)(মনে করিয়ে দাও|মনে করিয়ে|রিমাইন্ডার|remind me|remind)"), "")
+                .replace(Regex("(\\d+\\s*(মিনিট|ঘণ্টা|minute|hour|min)\\s*(পর|পরে|after)?)"), "")
+                .trim().ifBlank { "রিমাইন্ডার" }
+            if (delayMin > 0) {
+                val at = System.currentTimeMillis() + delayMin * 60_000L
+                ReminderScheduler.schedule(context, (at % Int.MAX_VALUE).toInt(), at, "রিমাইন্ডার", what, "reminder")
+                return Outcome.Reply(if (bn) "$delayMin মিনিট পর মনে করিয়ে দেব: $what।" else "I will remind you in $delayMin minutes: $what.")
+            }
+            val t = parseTime(norm)
+            if (t != null) {
+                val at = nextOccurrence(t.first, t.second)
+                ReminderScheduler.schedule(context, (at % Int.MAX_VALUE).toInt(), at, "রিমাইন্ডার", what, "reminder")
+                return Outcome.Reply(if (bn) "${formatTime(t.first, t.second)}-এ মনে করিয়ে দেব: $what।" else "Reminder set for ${formatTime(t.first, t.second)}: $what.")
+            }
+            return Outcome.Reply(if (bn) "কখন মনে করিয়ে দেব? যেমন: ১০ মিনিট পর ওষুধ খেতে মনে করিয়ে দাও।" else "When should I remind you? Say: remind me in 10 minutes.")
+        }
+
+        // ---- Add to schedule: "কাল সকাল ৯টায় মিটিং যোগ করো" ----
+        if (lower.containsAny("যোগ কর", "শিডিউলে রাখ", "add task", "schedule")) {
+            val t = parseTime(norm) ?: return Outcome.Reply(
+                if (bn) "সময়টা বলুন, যেমন: কাল সকাল ৯টায় মিটিং যোগ করো।" else "Tell me the time, e.g. add meeting tomorrow at 9 AM."
+            )
+            val title = original
+                .replace(Regex("(?i)(যোগ করো|যোগ কর|শিডিউলে রাখো|add|schedule)"), "")
+                .replace(Regex("(কাল|আগামীকাল|tomorrow)"), "")
+                .replace(Regex("\\d{1,2}(:\\d{2})?\\s*(টায়|টাই|am|pm|সকাল|দুপুর|বিকেল|সন্ধ্যা|রাত)?"), "")
+                .trim().ifBlank { "কাজ" }
+            val cal = Calendar.getInstance().apply {
+                if (lower.containsAny("কাল", "আগামীকাল", "tomorrow")) add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, t.first)
+                set(Calendar.MINUTE, t.second)
+                set(Calendar.SECOND, 0)
+            }
+            val task = store.add(title, cal.timeInMillis)
+            ReminderScheduler.scheduleTask(context, task) // includes the 15-minute-early reminder
+            return Outcome.Reply(if (bn) "শিডিউলে যোগ করলাম: $title, ${task.dayText()} ${task.timeText()}। ১৫ মিনিট আগেও মনে করিয়ে দেব।" else "Added: $title, ${task.dayText()} ${task.timeText()}. I will also remind you 15 minutes before.")
+        }
+
+        // ---- Read schedule ----
+        if (lower.containsAny("আজকের কাজ", "আজ কি আছে", "আজকের শিডিউল", "today", "সকালের সারাংশ", "সুপ্রভাত", "good morning")) {
+            val tasks = store.tasksToday()
+            return Outcome.Reply(
+                if (tasks.isEmpty()) {
+                    if (bn) "আজকের শিডিউলে কোনো কাজ নেই।" else "You have nothing scheduled today."
+                } else {
+                    val list = tasks.joinToString("। ") { "${it.timeText()}-এ ${it.title}" }
+                    if (bn) "আজকের কাজ ${tasks.size}টি: $list।" else "Today you have ${tasks.size} tasks: $list."
+                }
+            )
+        }
+        if (lower.containsAny("আগামীকাল", "কালকের", "tomorrow")) {
+            val tasks = store.tasksTomorrow()
+            return Outcome.Reply(
+                if (tasks.isEmpty()) {
+                    if (bn) "আগামীকালের খসড়ায় এখনো কোনো কাজ নেই।" else "Tomorrow's plan is empty so far."
+                } else {
+                    val list = tasks.joinToString("। ") { "${it.timeText()}-এ ${it.title}" }
+                    if (bn) "আগামীকালের খসড়া: $list।" else "Tomorrow's draft: $list."
+                }
+            )
+        }
+
+        // ---- Call (CONFIRMATION FIRST) ----
+        extractCallTarget(original, lower)?.let { targetName ->
+            val number = CallSmsHelper.findNumberByName(context, targetName) ?: targetName
+            pendingAction = {
+                val ok = try { CallSmsHelper.call(context, number); true } catch (e: Exception) { false }
+                if (ok) (if (bn) "$targetName-কে কল করছি..." else "Calling $targetName...")
+                else (if (bn) "কল করা যাচ্ছে না। CALL_PHONE অনুমতি দরকার।" else "Could not place the call. CALL_PHONE permission is needed.")
+            }
+            return Outcome.AskConfirmation(if (bn) "$targetName-কে কল করব?" else "Shall I call $targetName?")
+        }
+
+        // ---- SMS (CONFIRMATION FIRST): "রহিমকে মেসেজ পাঠাও আমি আসছি" ----
+        if (lower.containsAny("মেসেজ পাঠা", "এসএমএস", "send sms", "send message", "text ")) {
+            val parts = original.split(Regex("মেসেজ পাঠাও|এসএমএস পাঠাও|send sms|send message"), limit = 2)
+            val targetName = parts.getOrNull(0)?.trim()?.trimEnd('ক', 'ে')?.trim().orEmpty()
+            val message = parts.getOrNull(1)?.trim().orEmpty()
+            if (targetName.isNotBlank() && message.isNotBlank()) {
+                val number = CallSmsHelper.findNumberByName(context, targetName) ?: targetName
+                pendingAction = {
+                    if (CallSmsHelper.sendSms(context, number, message)) {
+                        if (bn) "$targetName-কে মেসেজ পাঠিয়ে দিলাম।" else "Message sent to $targetName."
+                    } else {
+                        if (bn) "মেসেজ পাঠানো যায়নি। SEND_SMS অনুমতি দরকার।" else "Could not send. SEND_SMS permission is needed."
+                    }
+                }
+                return Outcome.AskConfirmation(if (bn) "$targetName-কে এই মেসেজটা পাঠাব? \"$message\"" else "Shall I send this message to $targetName? \"$message\"")
+            }
+            return Outcome.Reply(if (bn) "কাকে, কী মেসেজ পাঠাব? যেমন: রহিমকে মেসেজ পাঠাও, আমি আসছি।" else "Who should I message, and what should it say?")
+        }
+
+        // ---- Missed calls ----
+        if (lower.containsAny("মিসড কল", "missed call")) {
+            val missed = CallReceiver.latestMissedCall(context)
+            return Outcome.Reply(
+                if (missed != null) (if (bn) "সর্বশেষ মিসড কল: $missed।" else "Latest missed call: $missed.")
+                else (if (bn) "কোনো মিসড কল পাইনি।" else "No missed calls found.")
+            )
+        }
+
+        // ---- Open app ----
+        extractAfter(original, listOf("খোলো", "খোল", "open "))?.let { appName ->
+            val opened = CallSmsHelper.openApp(context, appName.trim())
+            return Outcome.Reply(
+                if (opened != null) (if (bn) "$appName খুলে দিলাম।" else "Opening $appName.")
+                else (if (bn) "$appName অ্যাপটা খুঁজে পাইনি।" else "I could not find the $appName app.")
+            )
+        }
+        if (lower.containsAny("খোলো", "open")) {
+            for (app in CallSmsHelper.knownApps) {
+                if (lower.contains(app.lowercase()) || original.contains(app)) {
+                    val opened = CallSmsHelper.openApp(context, app)
+                    if (opened != null) return Outcome.Reply(if (bn) "$app খুলে দিলাম।" else "Opening $app.")
+                }
+            }
+        }
+
+        // ---- Thank you / bye ----
+        if (lower.containsAny("ধন্যবাদ", "thank")) {
+            return Outcome.Reply(if (bn) "আপনাকেও ধন্যবাদ! আর কিছু লাগলে \"জার্ভিস\" বললেই হবে।" else "You're welcome! Say \"Jarvis\" anytime.")
+        }
+
+        return Outcome.NeedsAi
+    }
+
+    // ---------- helpers ----------
+
+    private fun isYes(lower: String) =
+        lower.containsAny("হ্যাঁ", "হুম", "হে", "yes", "yeah", "ok", "ঠিক আছে", "করো", "পাঠাও", "ধরো")
+
+    private fun isNo(lower: String) =
+        lower.containsAny("না", "বাতিল", "no", "cancel", "থাক", "লাগবে না")
+
+    private fun parseTime(norm: String): Pair<Int, Int>? {
+        val m = Regex("(\\d{1,2})(?::(\\d{2}))?").find(norm) ?: return null
+        var hour = m.groupValues[1].toInt()
+        val minute = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+        val pm = norm.containsAny("pm", "দুপুর", "বিকেল", "সন্ধ্যা", "রাত", "বিকাল")
+        val am = norm.containsAny("am", "সকাল", "ভোর")
+        if (pm && hour < 12) hour += 12
+        if (am && hour == 12) hour = 0
+        if (hour !in 0..23 || minute !in 0..59) return null
+        return hour to minute
+    }
+
+    private fun nextOccurrence(hour: Int, minute: Int): Long {
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        if (cal.timeInMillis <= System.currentTimeMillis()) cal.add(Calendar.DAY_OF_YEAR, 1)
+        return cal.timeInMillis
+    }
+
+    private fun formatTime(h: Int, m: Int): String {
+        val hour12 = when { h == 0 -> 12; h > 12 -> h - 12; else -> h }
+        val suffix = if (h < 12) "AM" else "PM"
+        return String.format("%d:%02d %s", hour12, m, suffix)
+    }
+
+    private fun extractAfter(text: String, markers: List<String>): String? {
+        for (marker in markers) {
+            val idx = text.lowercase().indexOf(marker.lowercase())
+            if (idx >= 0) {
+                val before = text.substring(0, idx).trim()
+                val after = text.substring(idx + marker.length).trim()
+                // For "X খোলো" the app name is BEFORE the marker; for "open X" it is AFTER.
+                return (if (marker.trim().endsWith("o") || marker.contains("খোল")) before.ifBlank { after } else after.ifBlank { before })
+            }
+        }
+        return null
+    }
+
+    private fun extractCallTarget(original: String, lower: String): String? {
+        if (!lower.containsAny("কল কর", "ফোন কর", "call", "ফোন দাও")) return null
+        var t = original
+            .replace(Regex("(?i)(কল করো|কল কর|ফোন করো|ফোন কর|ফোন দাও|call|কল)"), "")
+            .trim().trimEnd('ক', 'ে')
+        if (t.endsWith("কে")) t = t.dropLast(2).trim()
+        return t.ifBlank { null }
+    }
+
+    companion object {
+        fun toEnglishDigits(s: String): String {
+            val bnDigits = "০১২৩৪৫৬৭৮৯"
+            val sb = StringBuilder()
+            for (ch in s) {
+                val i = bnDigits.indexOf(ch)
+                sb.append(if (i >= 0) ('0' + i) else ch)
+            }
+            return sb.toString()
+        }
+    }
+}
+
+private fun String.containsAny(vararg needles: String): Boolean =
+    needles.any { this.contains(it) }
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/CallSmsHelper.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.ContactsContract
+import android.telephony.SmsManager
+import androidx.core.content.ContextCompat
+
+/**
+ * Calls & SMS (spec section 3).
+ * SECURITY RULE: nothing in this file is ever called directly by the brain.
+ * The brain only ASKS "কল করব?" and calls these functions after the user says "হ্যাঁ".
+ */
+object CallSmsHelper {
+
+    /** Find a phone number from the contacts by (partial) name. */
+    fun findNumberByName(context: Context, name: String): String? {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED
+        ) return null
+        val uri = Uri.withAppendedPath(
+            ContactsContract.Contacts.CONTENT_FILTER_URI, Uri.encode(name)
+        )
+        context.contentResolver.query(uri, arrayOf(ContactsContract.Contacts._ID), null, null, null)
+            ?.use { c ->
+                if (!c.moveToFirst()) return null
+                val id = c.getString(0)
+                context.contentResolver.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                    ContactsContract.CommonDataKinds.Phone.CONTACT_ID + " = ?",
+                    arrayOf(id), null
+                )?.use { p -> if (p.moveToFirst()) return p.getString(0) }
+            }
+        return null
+    }
+
+    /** Display name for an incoming number (null = unknown number). */
+    fun nameForNumber(context: Context, number: String): String? {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED
+        ) return null
+        val uri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number)
+        )
+        context.contentResolver.query(
+            uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null
+        )?.use { c -> if (c.moveToFirst()) return c.getString(0) }
+        return null
+    }
+
+    /** Start the call. Requires CALL_PHONE permission (checked by caller UI). */
+    fun call(context: Context, number: String) {
+        val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+    }
+
+    /** Send an SMS directly (used only after an explicit "হ্যাঁ"). */
+    fun sendSms(context: Context, number: String, message: String): Boolean {
+        return try {
+            val sms = context.getSystemService(SmsManager::class.java)
+            sms.sendTextMessage(number, null, message, null, null)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Open another installed app by package name / known app name. */
+    fun openApp(context: Context, appQuery: String): String? {
+        val pm = context.packageManager
+        val known = mapOf(
+            "youtube" to "com.google.android.youtube", "ইউটিউব" to "com.google.android.youtube",
+            "facebook" to "com.facebook.katana", "ফেসবুক" to "com.facebook.katana",
+            "whatsapp" to "com.whatsapp", "হোয়াটসঅ্যাপ" to "com.whatsapp",
+            "gmail" to "com.google.android.gm", "জিমেইল" to "com.google.android.gm",
+            "chrome" to "com.android.chrome", "ক্রোম" to "com.android.chrome",
+            "camera" to "com.android.camera", "ক্যামেরা" to "com.android.camera",
+            "maps" to "com.google.android.apps.maps", "ম্যাপ" to "com.google.android.apps.maps"
+        )
+        val pkg = known[appQuery.lowercase().trim()]
+            ?: pm.getInstalledApplications(0).firstOrNull {
+                pm.getApplicationLabel(it).toString().contains(appQuery, ignoreCase = true)
+            }?.packageName
+            ?: return null
+        val intent = pm.getLaunchIntentForPackage(pkg) ?: return null
+        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(intent)
+        return pkg
+    }
+
+    /** Popular app names JARVIS understands for "X খোলো" commands. */
+    val knownApps = listOf("YouTube", "Facebook", "WhatsApp", "Gmail", "Chrome", "Camera", "Maps")
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/PhoneInfo.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.Environment
+import android.os.StatFs
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/** Phone info (spec section 3): battery, time, storage. */
+object PhoneInfo {
+
+    fun batteryPercent(context: Context): Int {
+        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) level * 100 / scale else -1
+    }
+
+    fun isCharging(context: Context): Boolean {
+        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    fun nowText(bn: Boolean): String {
+        val pattern = if (bn) "hh:mm a, EEEE" else "hh:mm a, EEEE"
+        return SimpleDateFormat(pattern, if (bn) Locale("bn", "BD") else Locale.US).format(Date())
+    }
+
+    fun storageText(): String {
+        val stat = StatFs(Environment.getDataDirectory().path)
+        val totalGb = stat.totalBytes / 1_000_000_000.0
+        val freeGb = stat.availableBytes / 1_000_000_000.0
+        return String.format(Locale.US, "মোট %.1f GB, ফাঁকা %.1f GB", totalGb, freeGb)
+    }
+
+    fun summary(context: Context, bn: Boolean): String {
+        val battery = batteryPercent(context)
+        val charging = if (isCharging(context)) if (bn) " (চার্জ হচ্ছে)" else " (charging)" else ""
+        return if (bn) {
+            "এখন সময় ${nowText(true)}। ব্যাটারি $battery%$charging। স্টোরেজ: ${storageText()}।"
+        } else {
+            "It is ${nowText(false)}. Battery is $battery%$charging. Storage: ${storageText()}."
+        }
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/Prefs.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.content.Context
+
+/**
+ * Memory (spec section 6): JARVIS remembers the user's preferences —
+ * name, language and voice. Stored on-device in SharedPreferences.
+ * Sensitive actions are NEVER auto-confirmed here; see AssistantBrain.
+ */
+class Prefs(context: Context) {
+
+    private val sp = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
+
+    var userName: String
+        get() = sp.getString(KEY_NAME, "") ?: ""
+        set(value) = sp.edit().putString(KEY_NAME, value).apply()
+
+    /** "bn" (বাংলা) or "en" (English) */
+    var language: String
+        get() = sp.getString(KEY_LANG, "bn") ?: "bn"
+        set(value) = sp.edit().putString(KEY_LANG, value).apply()
+
+    /** Voice speed slider, 0..100 */
+    var voiceRate: Int
+        get() = sp.getInt(KEY_RATE, 50)
+        set(value) = sp.edit().putInt(KEY_RATE, value).apply()
+
+    var wakeWordEnabled: Boolean
+        get() = sp.getBoolean(KEY_WAKE, false)
+        set(value) = sp.edit().putBoolean(KEY_WAKE, value).apply()
+
+    companion object {
+        private const val KEY_NAME = "user_name"
+        private const val KEY_LANG = "language"
+        private const val KEY_RATE = "voice_rate"
+        private const val KEY_WAKE = "wake_word"
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/ReminderScheduler.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+
+/**
+ * Sets exact alarms with AlarmManager:
+ *  - the alarm/reminder itself,
+ *  - and for schedule tasks, an EARLY reminder 15 minutes before (spec: 10–15 min আগে).
+ */
+object ReminderScheduler {
+
+    const val EXTRA_TITLE = "title"
+    const val EXTRA_MESSAGE = "message"
+    const val EXTRA_KIND = "kind" // "alarm", "reminder", "task_early", "task"
+
+    fun schedule(context: Context, requestCode: Int, atMillis: Long, title: String, message: String, kind: String) {
+        val am = context.getSystemService(AlarmManager::class.java)
+        val pi = pendingIntent(context, requestCode, title, message, kind)
+        if (atMillis <= System.currentTimeMillis()) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+            // Without exact-alarm permission, fall back to an inexact window.
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pi)
+        } else {
+            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pi)
+        }
+    }
+
+    fun scheduleTask(context: Context, task: JarviTask) {
+        // 15 minutes before the task:
+        schedule(
+            context, (task.id * 10 + 1).toInt(), task.timeMillis - 15 * 60 * 1000,
+            task.title, "১৫ মিনিট পর: ${task.title}", "task_early"
+        )
+        // At the task time:
+        schedule(
+            context, (task.id * 10 + 2).toInt(), task.timeMillis,
+            task.title, "এখন সময় হয়েছে: ${task.title}", "task"
+        )
+    }
+
+    fun cancelTask(context: Context, taskId: Long) {
+        val am = context.getSystemService(AlarmManager::class.java)
+        am.cancel(pendingIntent(context, (taskId * 10 + 1).toInt(), "", "", ""))
+        am.cancel(pendingIntent(context, (taskId * 10 + 2).toInt(), "", "", ""))
+    }
+
+    private fun pendingIntent(context: Context, code: Int, title: String, message: String, kind: String): PendingIntent {
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra(EXTRA_TITLE, title)
+            putExtra(EXTRA_MESSAGE, message)
+            putExtra(EXTRA_KIND, kind)
+        }
+        return PendingIntent.getBroadcast(
+            context, code, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/core/ScheduleStore.kt
+============================================================
+package com.doodlejoy.jarvis.core
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
+
+/** One scheduled task in JARVIS's own schedule. */
+data class JarviTask(
+    val id: Long,
+    val title: String,
+    val timeMillis: Long,
+    val done: Boolean = false
+) {
+    fun timeText(): String =
+        SimpleDateFormat("hh:mm a", Locale.US).format(java.util.Date(timeMillis))
+
+    fun dayText(): String =
+        SimpleDateFormat("EEE, d MMM", Locale.US).format(java.util.Date(timeMillis))
+}
+
+/**
+ * Schedule storage (spec section 4).
+ * Tasks live in SharedPreferences as JSON — simple and dependency-free.
+ * Calendar events are read separately from the system calendar (see ScheduleFragment).
+ */
+class ScheduleStore(context: Context) {
+
+    private val sp = context.getSharedPreferences("jarvis_tasks", Context.MODE_PRIVATE)
+
+    fun all(): List<JarviTask> {
+        val raw = sp.getString(KEY_TASKS, "[]") ?: "[]"
+        val arr = JSONArray(raw)
+        val out = mutableListOf<JarviTask>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            out.add(
+                JarviTask(
+                    id = o.getLong("id"),
+                    title = o.getString("title"),
+                    timeMillis = o.getLong("time"),
+                    done = o.optBoolean("done", false)
+                )
+            )
+        }
+        return out.sortedBy { it.timeMillis }
+    }
+
+    fun add(title: String, timeMillis: Long): JarviTask {
+        val task = JarviTask(System.currentTimeMillis(), title, timeMillis)
+        save(all() + task)
+        return task
+    }
+
+    fun delete(id: Long) {
+        save(all().filterNot { it.id == id })
+    }
+
+    fun tasksOn(dayStartMillis: Long): List<JarviTask> {
+        val end = dayStartMillis + 24L * 60 * 60 * 1000
+        return all().filter { it.timeMillis in dayStartMillis until end }
+    }
+
+    fun tasksToday(): List<JarviTask> = tasksOn(startOfToday())
+
+    fun tasksTomorrow(): List<JarviTask> =
+        tasksOn(startOfToday() + 24L * 60 * 60 * 1000)
+
+    private fun save(tasks: List<JarviTask>) {
+        val arr = JSONArray()
+        tasks.forEach { t ->
+            arr.put(
+                JSONObject()
+                    .put("id", t.id)
+                    .put("title", t.title)
+                    .put("time", t.timeMillis)
+                    .put("done", t.done)
+            )
+        }
+        sp.edit().putString(KEY_TASKS, arr.toString()).apply()
+    }
+
+    companion object {
+        private const val KEY_TASKS = "tasks"
+
+        fun startOfToday(): Long = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ui/ChatFragment.kt
+============================================================
+package com.doodlejoy.jarvis.ui
+
+import android.graphics.Color
+import android.os.Bundle
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.ai.AiChatClient
+import com.doodlejoy.jarvis.core.AssistantBrain
+import com.doodlejoy.jarvis.core.Prefs
+import com.doodlejoy.jarvis.databinding.FragmentChatBinding
+import com.doodlejoy.jarvis.databinding.ItemMessageBinding
+import kotlinx.coroutines.launch
+
+data class ChatMessage(val text: String, val fromUser: Boolean)
+
+/**
+ * Chat tab: same brain as voice, in writing.
+ * Every JARVIS reply is also spoken out loud (spec: এআই উত্তর বলে শোনাবে).
+ */
+class ChatFragment : Fragment() {
+
+    private var _binding: FragmentChatBinding? = null
+    private val binding get() = _binding!!
+    private val messages = mutableListOf<ChatMessage>()
+    private lateinit var adapter: MessageAdapter
+    private lateinit var brain: AssistantBrain
+    private lateinit var prefs: Prefs
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        _binding = FragmentChatBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        brain = AssistantBrain(requireContext())
+        prefs = Prefs(requireContext())
+        adapter = MessageAdapter(messages)
+        binding.chatList.layoutManager = LinearLayoutManager(requireContext())
+        binding.chatList.adapter = adapter
+
+        addMessage(ChatMessage(if (prefs.language == "en") "Hello! I am JARVIS. Type or use the mic." else "আসসালামু আলাইকুম! আমি জার্ভিস। লিখুন অথবা মাইকে বলুন।", fromUser = false), speak = false)
+
+        binding.chatSend.setOnClickListener { sendFromInput() }
+        binding.chatMic.setOnClickListener {
+            JarvisApp.instance.speech.listen(onResult = { heard ->
+                binding.chatInput.setText(heard)
+                sendFromInput()
+            })
+        }
+    }
+
+    private fun sendFromInput() {
+        val text = binding.chatInput.text?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) return
+        binding.chatInput.text?.clear()
+        addMessage(ChatMessage(text, fromUser = true), speak = false)
+        respond(text)
+    }
+
+    private fun respond(input: String) {
+        when (val outcome = brain.handle(input)) {
+            is AssistantBrain.Outcome.Reply -> addMessage(ChatMessage(outcome.text, false))
+            is AssistantBrain.Outcome.AskConfirmation -> addMessage(ChatMessage(outcome.question, false))
+            AssistantBrain.Outcome.NeedsAi -> viewLifecycleOwner.lifecycleScope.launch {
+                val reply = AiChatClient.ask(input, prefs.language)
+                addMessage(
+                    ChatMessage(
+                        reply ?: if (prefs.language == "en") "I don't know that yet. Try a command like: today's schedule."
+                        else "এটা এখনো শিখিনি। কমান্ড বলুন, যেমন: আজকের কাজ।",
+                        false
+                    )
+                )
+            }
+        }
+    }
+
+    private fun addMessage(msg: ChatMessage, speak: Boolean = true) {
+        messages.add(msg)
+        adapter.notifyItemInserted(messages.size - 1)
+        binding.chatList.scrollToPosition(messages.size - 1)
+        if (!msg.fromUser && speak) JarvisApp.instance.speech.speak(msg.text)
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+
+class MessageAdapter(private val items: List<ChatMessage>) :
+    RecyclerView.Adapter<MessageAdapter.VH>() {
+
+    class VH(val binding: ItemMessageBinding) : RecyclerView.ViewHolder(binding.root)
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+        val binding = ItemMessageBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+        return VH(binding)
+    }
+
+    override fun onBindViewHolder(holder: VH, position: Int) {
+        val msg = items[position]
+        holder.binding.bubbleText.text = msg.text
+        val root = holder.binding.bubbleRoot
+        root.gravity = if (msg.fromUser) Gravity.END else Gravity.START
+        holder.binding.bubbleText.setBackgroundColor(
+            if (msg.fromUser) Color.parseColor("#00586B") else Color.parseColor("#12233D")
+        )
+        (holder.binding.bubbleText.layoutParams as? LinearLayout.LayoutParams)?.gravity =
+            if (msg.fromUser) Gravity.END else Gravity.START
+    }
+
+    override fun getItemCount() = items.size
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ui/GlowingRingView.kt
+============================================================
+package com.doodlejoy.jarvis.ui
+
+import android.animation.ValueAnimator
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.util.AttributeSet
+import android.view.View
+import android.view.animation.LinearInterpolator
+import kotlin.math.min
+
+/**
+ * Futuristic glowing ring around the avatar.
+ * States: IDLE (slow breathing), LISTENING (fast pulse), SPEAKING (wave-like), SLEEPING (dim).
+ */
+class GlowingRingView @JvmOverloads constructor(
+    context: Context, attrs: AttributeSet? = null
+) : View(context, attrs) {
+
+    enum class State { IDLE, LISTENING, SPEAKING, SLEEPING }
+
+    var state: State = State.IDLE
+        set(value) {
+            field = value
+            animator.duration = when (value) {
+                State.LISTENING -> 700L
+                State.SPEAKING -> 450L
+                State.IDLE -> 2200L
+                State.SLEEPING -> 4000L
+            }
+            if (!animator.isRunning) animator.start()
+        }
+
+    private val neon = Color.parseColor("#00E5FF")
+    private val dim = Color.parseColor("#00707E")
+    private var phase = 0f
+
+    private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+        repeatCount = ValueAnimator.INFINITE
+        interpolator = LinearInterpolator()
+        addUpdateListener {
+            phase = it.animatedValue as Float
+            invalidate()
+        }
+    }
+
+    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        animator.start()
+    }
+
+    override fun onDetachedFromWindow() {
+        animator.cancel()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val cx = width / 2f
+        val cy = height / 2f
+        val baseR = min(width, height) / 2f - 18f
+        val pulse = when (state) {
+            State.LISTENING -> kotlin.math.sin(phase * Math.PI * 2).toFloat() * 8f
+            State.SPEAKING -> kotlin.math.sin(phase * Math.PI * 4).toFloat() * 5f
+            State.IDLE -> kotlin.math.sin(phase * Math.PI * 2).toFloat() * 3f
+            State.SLEEPING -> 0f
+        }
+        val alpha = if (state == State.SLEEPING) 60 else 255
+
+        // Outer soft glows
+        for (i in 3 downTo 1) {
+            glowPaint.color = if (state == State.SLEEPING) dim else neon
+            glowPaint.alpha = (alpha * 0.12f).toInt()
+            glowPaint.strokeWidth = 10f * i
+            canvas.drawCircle(cx, cy, baseR + pulse + i * 4f, glowPaint)
+        }
+        // Bright core ring
+        corePaint.color = if (state == State.SLEEPING) dim else neon
+        corePaint.alpha = alpha
+        corePaint.strokeWidth = 5f
+        canvas.drawCircle(cx, cy, baseR + pulse, corePaint)
+        // Rotating arc accent
+        corePaint.alpha = (alpha * 0.7f).toInt()
+        corePaint.strokeWidth = 3f
+        val start = phase * 360f
+        canvas.drawArc(cx - baseR - 12f, cy - baseR - 12f, cx + baseR + 12f, cy + baseR + 12f, start, 70f, false, corePaint)
+        canvas.drawArc(cx - baseR - 12f, cy - baseR - 12f, cx + baseR + 12f, cy + baseR + 12f, start + 180f, 70f, false, corePaint)
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ui/HomeFragment.kt
+============================================================
+package com.doodlejoy.jarvis.ui
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.ai.AiChatClient
+import com.doodlejoy.jarvis.core.AssistantBrain
+import com.doodlejoy.jarvis.core.PhoneInfo
+import com.doodlejoy.jarvis.core.Prefs
+import com.doodlejoy.jarvis.databinding.FragmentHomeBinding
+import com.doodlejoy.jarvis.voice.WakeWordService
+import kotlinx.coroutines.launch
+
+/**
+ * Home (spec sections 1–3):
+ * glowing ring + avatar face + speech bubble + big mic button,
+ * conversation mode, wake-word toggle, live phone info.
+ *
+ * Conversation mode (spec section 2): after JARVIS finishes speaking it
+ * listens again by itself; if the user stays silent ~2 rounds, it sleeps.
+ */
+class HomeFragment : Fragment() {
+
+    private var _binding: FragmentHomeBinding? = null
+    private val binding get() = _binding!!
+
+    private val app get() = JarvisApp.instance
+    private val speech get() = app.speech
+    private lateinit var brain: AssistantBrain
+    private lateinit var prefs: Prefs
+
+    private var conversationMode = false
+    private var silenceCount = 0
+    private val handler = Handler(Looper.getMainLooper())
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        _binding = FragmentHomeBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        brain = AssistantBrain(requireContext())
+        prefs = Prefs(requireContext())
+
+        say(
+            if (prefs.language == "en") "Hello! I am JARVIS. Tap the mic and speak."
+            else "আসসালামু আলাইকুম! আমি জার্ভিস। মাইকে চাপ দিয়ে কথা বলুন।",
+            speakAloud = false
+        )
+        refreshPhoneInfo()
+
+        speech.onListeningState = { listening ->
+            if (_binding == null) return@onListeningState
+            binding.ringView.state = if (listening) GlowingRingView.State.LISTENING else GlowingRingView.State.IDLE
+            binding.statusText.text = if (listening) "শুনছি..." else "বলতে মাইকে চাপ দিন"
+        }
+        speech.onSpeakDone = {
+            if (_binding == null) return@onSpeakDone
+            binding.ringView.state = GlowingRingView.State.IDLE
+            if (conversationMode) listenOnce()
+        }
+
+        binding.micButton.setOnClickListener {
+            silenceCount = 0
+            listenOnce()
+        }
+
+        binding.conversationToggle.setOnClickListener {
+            if (conversationMode) stopConversation() else startConversationMode()
+        }
+
+        updateWakeButton()
+        binding.wakeWordToggle.setOnClickListener {
+            if (prefs.wakeWordEnabled) {
+                requireContext().stopService(Intent(requireContext(), WakeWordService::class.java))
+                prefs.wakeWordEnabled = false
+            } else {
+                // Android 14 asks users to allow the microphone foreground service from settings
+                // on some phones; if start fails we still try the regular start.
+                ContextCompat.startForegroundService(requireContext(), Intent(requireContext(), WakeWordService::class.java))
+                prefs.wakeWordEnabled = true
+                Toast.makeText(
+                    requireContext(),
+                    "ওয়েক ওয়ার্ড চালু। নোট: ব্যাটারি সেটিংসে এই অ্যাপকে Unrestricted করে দিন।",
+                    Toast.LENGTH_LONG
+                ).show()
+                openBatterySettingsHint()
+            }
+            updateWakeButton()
+        }
+    }
+
+    private fun updateWakeButton() {
+        if (_binding == null) return
+        binding.wakeWordToggle.text =
+            if (prefs.wakeWordEnabled) "ওয়েক ওয়ার্ড বন্ধ করুন" else "ওয়েক ওয়ার্ড (\"জার্ভিস\") চালু করুন"
+        binding.ringView.state =
+            if (prefs.wakeWordEnabled) GlowingRingView.State.IDLE else GlowingRingView.State.SLEEPING
+    }
+
+    private fun openBatterySettingsHint() {
+        // Best effort: open this app's details so the user can set Battery = Unrestricted.
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${requireContext().packageName}")
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** One listening round: hear -> think -> speak. */
+    private fun listenOnce() {
+        speech.listen(
+            onResult = { heard ->
+                silenceCount = 0
+                binding.statusText.text = "আপনি: $heard"
+                handleCommand(heard)
+            },
+            onError = { _ ->
+                if (conversationMode) {
+                    silenceCount++
+                    if (silenceCount >= 2) {
+                        say(if (prefs.language == "en") "Going to sleep. Say \"Jarvis\" to wake me." else "আমি ঘুমিয়ে গেলাম। জাগাতে \"জার্ভিস\" বলুন।")
+                        stopConversation()
+                    } else {
+                        handler.postDelayed({ if (conversationMode) listenOnce() }, 600)
+                    }
+                }
+            }
+        )
+    }
+
+    fun handleCommand(input: String) {
+        when (val outcome = brain.handle(input)) {
+            is AssistantBrain.Outcome.Reply -> say(outcome.text)
+            is AssistantBrain.Outcome.AskConfirmation -> say(outcome.question)
+            AssistantBrain.Outcome.NeedsAi -> {
+                // Free chat goes to the user's server (key stays on the server).
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val reply = AiChatClient.ask(input, prefs.language)
+                    say(
+                        reply ?: if (prefs.language == "en") {
+                            "I don't know that command yet. Try: set an alarm, call someone, today's schedule, battery."
+                        } else {
+                            "এই কমান্ডটা এখনো শিখিনি। বলুন: অ্যালার্ম দাও, কল করো, আজকের কাজ, ব্যাটারি কত।"
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    /** Show in the speech bubble and (optionally) speak out loud. */
+    fun say(text: String, speakAloud: Boolean = true) {
+        if (_binding == null) return
+        binding.speechBubble.text = text
+        if (speakAloud) {
+            binding.ringView.state = GlowingRingView.State.SPEAKING
+            speech.speak(text)
+            // If TTS is unavailable, onSpeakDone never fires — keep conversation mode moving.
+            if (speech.isSpeaking.not()) {
+                handler.postDelayed({ speech.onSpeakDone?.invoke() }, 1200)
+            }
+        }
+    }
+
+    fun startConversationMode() {
+        conversationMode = true
+        silenceCount = 0
+        if (_binding != null) {
+            binding.conversationToggle.text = "কথোপকথন মোড বন্ধ করুন"
+            say(if (prefs.language == "en") "Conversation mode on. I am listening." else "কথোপকথন মোড চালু। বলুন, শুনছি।")
+            // onSpeakDone will trigger listenOnce()
+        }
+    }
+
+    private fun stopConversation() {
+        conversationMode = false
+        speech.stopListening()
+        if (_binding != null) binding.conversationToggle.text = "কথোপকথন মোড চালু করুন"
+    }
+
+    private fun refreshPhoneInfo() {
+        binding.phoneInfo.text = "📱 " + PhoneInfo.summary(requireContext(), prefs.language != "en")
+        handler.postDelayed({ if (_binding != null) refreshPhoneInfo() }, 30_000)
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ui/ScheduleFragment.kt
+============================================================
+package com.doodlejoy.jarvis.ui
+
+import android.app.TimePickerDialog
+import android.content.ContentUris
+import android.os.Bundle
+import android.provider.CalendarContract
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.core.JarviTask
+import com.doodlejoy.jarvis.core.Prefs
+import com.doodlejoy.jarvis.core.ReminderScheduler
+import com.doodlejoy.jarvis.core.ScheduleStore
+import com.doodlejoy.jarvis.databinding.FragmentScheduleBinding
+import com.doodlejoy.jarvis.databinding.ItemTaskBinding
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
+
+/**
+ * Schedule tab (spec section 4):
+ *  - JARVIS's own tasks for today (add by typing, or by voice from Home/Chat)
+ *  - reads the phone CALENDAR for today's events
+ *  - morning summary button, tomorrow's draft button
+ *  - every task automatically gets a reminder 15 minutes early (ReminderScheduler)
+ */
+class ScheduleFragment : Fragment() {
+
+    private var _binding: FragmentScheduleBinding? = null
+    private val binding get() = _binding!!
+    private lateinit var store: ScheduleStore
+    private lateinit var prefs: Prefs
+    private val adapter = TaskAdapter(mutableListOf()) { task ->
+        ReminderScheduler.cancelTask(requireContext(), task.id)
+        store.delete(task.id)
+        reload()
+    }
+    private var pickedTime: Calendar? = null
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        _binding = FragmentScheduleBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        store = ScheduleStore(requireContext())
+        prefs = Prefs(requireContext())
+        binding.taskList.layoutManager = LinearLayoutManager(requireContext())
+        binding.taskList.adapter = adapter
+        reload()
+
+        binding.taskTime.setOnClickListener {
+            val now = Calendar.getInstance()
+            TimePickerDialog(requireContext(), { _, h, m ->
+                pickedTime = Calendar.getInstance().apply {
+                    set(Calendar.HOUR_OF_DAY, h)
+                    set(Calendar.MINUTE, m)
+                    set(Calendar.SECOND, 0)
+                }
+                binding.taskTime.setText(SimpleDateFormat("hh:mm a", Locale.US).format(pickedTime!!.time))
+            }, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE), false).show()
+        }
+
+        binding.addTask.setOnClickListener {
+            val title = binding.taskTitle.text?.toString()?.trim().orEmpty()
+            val time = pickedTime
+            if (title.isEmpty() || time == null) {
+                Toast.makeText(requireContext(), "কাজের নাম আর সময় দিন", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val task = store.add(title, time.timeInMillis)
+            ReminderScheduler.scheduleTask(requireContext(), task)
+            binding.taskTitle.text?.clear()
+            binding.taskTime.text?.clear()
+            pickedTime = null
+            reload()
+            JarvisApp.instance.speech.speak("যোগ করলাম: $title")
+        }
+
+        binding.morningSummary.setOnClickListener { speakSummary(today = true) }
+        binding.tomorrowPlan.setOnClickListener { speakSummary(today = false) }
+    }
+
+    private fun reload() {
+        adapter.replace(store.tasksToday())
+    }
+
+    /** Morning summary / tomorrow draft, spoken out loud. Includes calendar events. */
+    private fun speakSummary(today: Boolean) {
+        val tasks = if (today) store.tasksToday() else store.tasksTomorrow()
+        val events = readCalendarEvents(today)
+        val bn = prefs.language != "en"
+        val sb = StringBuilder()
+        sb.append(
+            when {
+                today && bn -> "আজকের সারাংশ। "
+                today -> "Your summary for today. "
+                bn -> "আগামীকালের খসড়া। "
+                else -> "Tomorrow's draft. "
+            }
+        )
+        if (tasks.isEmpty() && events.isEmpty()) {
+            sb.append(if (bn) "কোনো কাজ নেই।" else "Nothing scheduled.")
+        }
+        tasks.forEach { sb.append("${it.timeText()}-এ ${it.title}। ") }
+        events.forEach { sb.append("${it.second}-এ ক্যালেন্ডারে: ${it.first}। ") }
+        JarvisApp.instance.speech.speak(sb.toString())
+        Toast.makeText(requireContext(), sb.toString(), Toast.LENGTH_LONG).show()
+    }
+
+    /** Read today's (or tomorrow's) events from the system calendar. Returns (title, timeText). */
+    private fun readCalendarEvents(today: Boolean): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        try {
+            val dayStart = Calendar.getInstance().apply {
+                if (!today) add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0)
+            }
+            val begin = dayStart.timeInMillis
+            val end = begin + 24L * 60 * 60 * 1000
+            val builder = CalendarContract.Instances.CONTENT_URI.buildUpon()
+            ContentUris.appendId(builder, begin)
+            ContentUris.appendId(builder, end)
+            requireContext().contentResolver.query(
+                builder.build(),
+                arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN),
+                null, null, CalendarContract.Instances.BEGIN + " ASC"
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val title = c.getString(0) ?: continue
+                    val start = c.getLong(1)
+                    out.add(title to SimpleDateFormat("hh:mm a", Locale.US).format(java.util.Date(start)))
+                }
+            }
+        } catch (e: SecurityException) {
+            // No READ_CALENDAR permission — the summary just skips calendar events.
+        }
+        return out
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+
+class TaskAdapter(
+    private val items: MutableList<JarviTask>,
+    private val onDelete: (JarviTask) -> Unit
+) : RecyclerView.Adapter<TaskAdapter.VH>() {
+
+    class VH(val binding: ItemTaskBinding) : RecyclerView.ViewHolder(binding.root)
+
+    fun replace(tasks: List<JarviTask>) {
+        items.clear()
+        items.addAll(tasks)
+        notifyDataSetChanged()
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+        val binding = ItemTaskBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+        return VH(binding)
+    }
+
+    override fun onBindViewHolder(holder: VH, position: Int) {
+        val task = items[position]
+        holder.binding.taskText.text = "${task.timeText()}  •  ${task.title}"
+        holder.binding.taskDelete.setOnClickListener { onDelete(task) }
+    }
+
+    override fun getItemCount() = items.size
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/ui/SettingsFragment.kt
+============================================================
+package com.doodlejoy.jarvis.ui
+
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.fragment.app.Fragment
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.core.Prefs
+import com.doodlejoy.jarvis.databinding.FragmentSettingsBinding
+
+/**
+ * Settings tab (spec section 6 — memory & safety):
+ * the user's name, language and voice speed are REMEMBERED here and
+ * used everywhere (greetings, speech recognition, TTS).
+ */
+class SettingsFragment : Fragment() {
+
+    private var _binding: FragmentSettingsBinding? = null
+    private val binding get() = _binding!!
+    private lateinit var prefs: Prefs
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        _binding = FragmentSettingsBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        prefs = Prefs(requireContext())
+
+        binding.userName.setText(prefs.userName)
+        if (prefs.language == "en") binding.langEn.isChecked = true else binding.langBn.isChecked = true
+        binding.voiceRate.progress = prefs.voiceRate
+
+        binding.saveSettings.setOnClickListener {
+            prefs.userName = binding.userName.text?.toString()?.trim().orEmpty()
+            prefs.language = if (binding.langEn.isChecked) "en" else "bn"
+            prefs.voiceRate = binding.voiceRate.progress
+            Toast.makeText(requireContext(), "সেভ হয়েছে", Toast.LENGTH_SHORT).show()
+            JarvisApp.instance.speech.speak(
+                if (prefs.language == "en") "Saved. I will remember your preferences."
+                else "সেভ করে রাখলাম। আপনার পছন্দ মনে থাকবে।"
+            )
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/voice/SpeechManager.kt
+============================================================
+package com.doodlejoy.jarvis.voice
+
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import com.doodlejoy.jarvis.core.Prefs
+import java.util.Locale
+
+/**
+ * One engine for BOTH directions of voice:
+ *  - listen(): SpeechRecognizer in the user's chosen language (বাংলা bn-BD / English en-US)
+ *  - speak():  TextToSpeech in the same language; JARVIS always answers out loud.
+ */
+class SpeechManager(private val context: Context) : TextToSpeech.OnInitListener {
+
+    private val prefs = Prefs(context)
+    private val main = Handler(Looper.getMainLooper())
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var recognizer: SpeechRecognizer? = null
+
+    var onListeningState: ((Boolean) -> Unit)? = null
+    var onSpeakDone: (() -> Unit)? = null
+
+    init {
+        tts = TextToSpeech(context, this)
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            applyVoiceSettings()
+            ttsReady = true
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    main.post { onSpeakDone?.invoke() }
+                }
+                @Deprecated("deprecated")
+                override fun onError(utteranceId: String?) {
+                    main.post { onSpeakDone?.invoke() }
+                }
+            })
+        }
+    }
+
+    fun locale(): Locale =
+        if (prefs.language == "en") Locale.US else Locale("bn", "BD")
+
+    private fun applyVoiceSettings() {
+        tts?.language = locale()
+        tts?.setSpeechRate(0.7f + prefs.voiceRate / 100f * 0.6f) // settings slider
+    }
+
+    /** Speak text out loud (and refresh voice settings first, cheap). */
+    fun speak(text: String, flush: Boolean = true) {
+        if (!ttsReady) return
+        applyVoiceSettings()
+        val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        tts?.speak(text, mode, null, "jarvis_utterance")
+    }
+
+    fun stopSpeaking() {
+        tts?.stop()
+    }
+
+    val isSpeaking: Boolean get() = tts?.isSpeaking == true
+
+    /**
+     * Listen once. onResult gets the best transcript, onError a short message.
+     * Used by: mic button, conversation mode, wake-word service.
+     */
+    fun listen(onResult: (String) -> Unit, onError: (String) -> Unit = {}) {
+        main.post {
+            destroyRecognizer()
+            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                onError("এই ফোনে ভয়েস রিকগনিশন পাওয়া যাচ্ছে না")
+                return@post
+            }
+            recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) { onListeningState?.invoke(true) }
+                    override fun onEndOfSpeech() { onListeningState?.invoke(false) }
+                    override fun onError(error: Int) {
+                        onListeningState?.invoke(false)
+                        onError(
+                            when (error) {
+                                SpeechRecognizer.ERROR_NO_MATCH -> "শুনতে পাইনি, আবার বলুন"
+                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "সময় শেষ"
+                                SpeechRecognizer.ERROR_NETWORK -> "নেটওয়ার্ক সমস্যা"
+                                else -> "ভয়েস এরর: $error"
+                            }
+                        )
+                    }
+                    override fun onResults(results: Bundle?) {
+                        onListeningState?.invoke(false)
+                        val text = results
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()
+                        if (text.isNullOrBlank()) onError("শুনতে পাইনি, আবার বলুন") else onResult(text)
+                    }
+                    override fun onBeginningOfSpeech() {}
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onPartialResults(partialResults: Bundle?) {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale().toLanguageTag())
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                }
+                startListening(intent)
+            }
+        }
+    }
+
+    fun stopListening() {
+        main.post {
+            recognizer?.stopListening()
+            onListeningState?.invoke(false)
+        }
+    }
+
+    private fun destroyRecognizer() {
+        recognizer?.destroy()
+        recognizer = null
+    }
+
+    fun shutdown() {
+        tts?.shutdown()
+        destroyRecognizer()
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/java/com/doodlejoy/jarvis/voice/WakeWordService.kt
+============================================================
+package com.doodlejoy.jarvis.voice
+
+import android.app.Notification
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import androidx.core.app.NotificationCompat
+import com.doodlejoy.jarvis.JarvisApp
+import com.doodlejoy.jarvis.MainActivity
+import com.doodlejoy.jarvis.R
+
+/**
+ * Wake-word service (LAST step of the build order, per spec).
+ *
+ * Keeps a foreground service alive with a PERMANENT notification and listens
+ * in a loop. When it hears "জার্ভিস" / "jarvis" / "hey jarvis" it opens the
+ * app and starts conversation mode.
+ *
+ * Honest notes (also in README):
+ *  - Always-listening uses more battery.
+ *  - On some phones set this app's battery usage to "Unrestricted".
+ *  - SpeechRecognizer needs short restarts; the loop below handles that.
+ */
+class WakeWordService : Service() {
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var running = false
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID, buildNotification())
+        if (!running) {
+            running = true
+            listenLoop()
+        }
+        return START_STICKY
+    }
+
+    private fun buildNotification(): Notification {
+        val openApp = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, JarvisApp.CHANNEL_LISTENING)
+            .setContentTitle("JARVIS শুনছে...")
+            .setContentText("\"জার্ভিস\" বললেই জেগে উঠবে")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun listenLoop() {
+        if (!running) return
+        val speech = JarvisApp.instance.speech
+        // Don't fight the TTS: while JARVIS is speaking, wait and retry.
+        if (speech.isSpeaking) {
+            handler.postDelayed({ listenLoop() }, 800)
+            return
+        }
+        speech.listen(
+            onResult = { heard ->
+                if (isWakeWord(heard)) {
+                    onWakeWord()
+                }
+                scheduleNext()
+            },
+            onError = { scheduleNext() }
+        )
+    }
+
+    private fun scheduleNext() {
+        handler.postDelayed({ listenLoop() }, 350)
+    }
+
+    private fun isWakeWord(text: String): Boolean {
+        val t = text.lowercase()
+        return t.contains("জার্ভিস") || t.contains("jarvis") || t.contains("জারবিস")
+    }
+
+    private fun onWakeWord() {
+        val speech = JarvisApp.instance.speech
+        speech.speak("জি, বলুন। আমি শুনছি।")
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(MainActivity.EXTRA_START_CONVERSATION, true)
+        }
+        startActivity(intent)
+    }
+
+    override fun onDestroy() {
+        running = false
+        super.onDestroy()
+    }
+
+    companion object {
+        const val NOTIFICATION_ID = 1001
+    }
+}
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/drawable/ic_launcher_fg.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- glowing ring -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,14 a40,40 0 1,0 0.1,0"
+        android:strokeWidth="5"
+        android:strokeColor="#00E5FF" />
+    <!-- antenna -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M52,22 h4 v10 h-4 z" />
+    <!-- face -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M36,40 h36 a6,6 0 0,1 6,6 v22 a6,6 0 0,1 -6,6 h-36 a6,6 0 0,1 -6,-6 v-22 a6,6 0 0,1 6,-6 z" />
+    <!-- eyes -->
+    <path
+        android:fillColor="#050A14"
+        android:pathData="M42,54 a4,4 0 1,0 0.1,0 M62,54 a4,4 0 1,0 0.1,0" />
+</vector>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/activity_main.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:orientation="vertical">
+
+    <FrameLayout
+        android:id="@+id/fragmentContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottomNav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bg_panel"
+        app:itemIconTint="@color/neon"
+        app:itemTextColor="@color/text_main"
+        app:menu="@menu/bottom_nav_menu"
+        xmlns:app="http://schemas.android.com/apk/res-auto" />
+
+</LinearLayout>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/fragment_chat.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:orientation="vertical">
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/chatList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="10dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bg_panel"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/chatInput"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="লিখুন বা মাইকে বলুন..."
+            android:textColor="@color/text_main"
+            android:textColorHint="@color/text_dim" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/chatMic"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎤" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/chatSend"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="পাঠান" />
+    </LinearLayout>
+</LinearLayout>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/fragment_home.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.3"
+            android:text="J A R V I S"
+            android:textColor="@color/neon"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <!-- AI avatar face inside the glowing ring -->
+        <FrameLayout
+            android:layout_width="240dp"
+            android:layout_height="240dp"
+            android:layout_marginTop="16dp">
+
+            <com.doodlejoy.jarvis.ui.GlowingRingView
+                android:id="@+id/ringView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/avatarFace"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="🤖"
+                android:textSize="84sp" />
+        </FrameLayout>
+
+        <!-- Speech bubble: what JARVIS says -->
+        <TextView
+            android:id="@+id/speechBubble"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@color/bubble_ai"
+            android:padding="14dp"
+            android:textColor="@color/text_main"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/tap_to_talk"
+            android:textColor="@color/text_dim"
+            android:textSize="14sp" />
+
+        <!-- Big mic button -->
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/micButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:contentDescription="@string/tap_to_talk"
+            android:src="@android:drawable/ic_btn_speak_now"
+            app:backgroundTint="@color/neon"
+            xmlns:app="http://schemas.android.com/apk/res-auto" />
+
+        <!-- Phone info card -->
+        <TextView
+            android:id="@+id/phoneInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:background="@color/bg_panel"
+            android:padding="12dp"
+            android:textColor="@color/text_dim"
+            android:textSize="14sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/conversationToggle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="কথোপকথন মোড চালু করুন" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/wakeWordToggle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="ওয়েক ওয়ার্ড (&quot;জার্ভিস&quot;) চালু করুন" />
+
+    </LinearLayout>
+</ScrollView>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/fragment_schedule.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:orientation="vertical"
+    android:padding="14dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="আজকের শিডিউল"
+        android:textColor="@color/neon"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/taskList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="10dp"
+        android:layout_weight="1" />
+
+    <com.google.android.material.textfield.TextInputEditText
+        android:id="@+id/taskTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="কাজের নাম (ভয়েসেও যোগ করা যায়)"
+        android:textColor="@color/text_main"
+        android:textColorHint="@color/text_dim" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/taskTime"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:focusable="false"
+            android:hint="সময় বেছে নিন"
+            android:textColor="@color/text_main"
+            android:textColorHint="@color/text_dim" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/addTask"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="যোগ করুন" />
+    </LinearLayout>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/morningSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="সকালের সারাংশ শুনুন" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/tomorrowPlan"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="আগামীকালের খসড়া দেখুন" />
+</LinearLayout>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/fragment_settings.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="সেটিংস ও মেমোরি"
+            android:textColor="@color/neon"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/userName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:hint="আপনার নাম (জার্ভিস মনে রাখবে)"
+            android:textColor="@color/text_main"
+            android:textColorHint="@color/text_dim" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="ভাষা / Language"
+            android:textColor="@color/text_main" />
+
+        <RadioGroup
+            android:id="@+id/languageGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/langBn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="বাংলা"
+                android:textColor="@color/text_main" />
+
+            <RadioButton
+                android:id="@+id/langEn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="English"
+                android:textColor="@color/text_main" />
+        </RadioGroup>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="কণ্ঠের গতি"
+            android:textColor="@color/text_main" />
+
+        <SeekBar
+            android:id="@+id/voiceRate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="50" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/saveSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="সেভ করুন" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="নিরাপত্তা: কল, SMS-এর মতো সংবেদনশীল কাজে জার্ভিস সবসময় আগে জিজ্ঞেস করবে। API key কখনো ফোনে থাকে না — সার্ভারে থাকে।\n\nনোট: ওয়েক ওয়ার্ড চালু থাকলে স্ক্রিনে স্থায়ী নোটিফিকেশন থাকবে এবং ব্যাটারি একটু বেশি খরচ হবে। ফোনের Settings → Apps → JARVIS → Battery-তে গিয়ে &quot;Unrestricted&quot; করে দিন।"
+            android:textColor="@color/text_dim"
+            android:textSize="13sp" />
+    </LinearLayout>
+</ScrollView>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/item_message.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/bubbleRoot"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingTop="4dp"
+    android:paddingBottom="4dp">
+
+    <TextView
+        android:id="@+id/bubbleText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:maxWidth="300dp"
+        android:padding="12dp"
+        android:textColor="@color/text_main"
+        android:textSize="15sp" />
+</LinearLayout>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/layout/item_task.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/bg_panel"
+    android:orientation="horizontal"
+    android:padding="12dp"
+    android:layout_marginBottom="8dp">
+
+    <TextView
+        android:id="@+id/taskText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textColor="@color/text_main"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/taskDelete"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:padding="4dp"
+        android:text="✕"
+        android:textColor="@color/neon"
+        android:textSize="16sp" />
+</LinearLayout>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/menu/bottom_nav_menu.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_home"
+        android:icon="@android:drawable/ic_menu_view"
+        android:title="@string/nav_home" />
+    <item
+        android:id="@+id/nav_chat"
+        android:icon="@android:drawable/ic_dialog_email"
+        android:title="@string/nav_chat" />
+    <item
+        android:id="@+id/nav_schedule"
+        android:icon="@android:drawable/ic_menu_agenda"
+        android:title="@string/nav_schedule" />
+    <item
+        android:id="@+id/nav_settings"
+        android:icon="@android:drawable/ic_menu_preferences"
+        android:title="@string/nav_settings" />
+</menu>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/bg_dark" />
+    <foreground android:drawable="@drawable/ic_launcher_fg" />
+</adaptive-icon>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/values/colors.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#050A14</color>
+    <color name="bg_panel">#0B1526</color>
+    <color name="neon">#00E5FF</color>
+    <color name="neon_dim">#00707E</color>
+    <color name="accent">#7C4DFF</color>
+    <color name="text_main">#E8F6FF</color>
+    <color name="text_dim">#8FB3C7</color>
+    <color name="bubble_ai">#12233D</color>
+    <color name="bubble_user">#00586B</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+</resources>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/values/strings.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS AI</string>
+    <string name="nav_home">হোম</string>
+    <string name="nav_chat">চ্যাট</string>
+    <string name="nav_schedule">শিডিউল</string>
+    <string name="nav_settings">সেটিংস</string>
+    <string name="listening">শুনছি...</string>
+    <string name="tap_to_talk">বলতে মাইকে চাপ দিন</string>
+</resources>
+
+
+============================================================
+FILE: JARVIS-AI/app/src/main/res/values/themes.xml
+============================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Jarvis" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/neon</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="android:windowBackground">@color/bg_dark</item>
+        <item name="android:statusBarColor">@color/bg_dark</item>
+        <item name="android:navigationBarColor">@color/bg_dark</item>
+        <item name="android:textColorPrimary">@color/text_main</item>
+        <item name="android:textColorSecondary">@color/text_dim</item>
+    </style>
+</resources>
+
+
+============================================================
+FILE: JARVIS-AI/build.gradle.kts
+============================================================
+// Top-level build file
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+}
+
+
+============================================================
+FILE: JARVIS-AI/gradle.properties
+============================================================
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+android.nonTransitiveRClass=true
+
+
+============================================================
+FILE: JARVIS-AI/gradle/wrapper/gradle-wrapper.properties
+============================================================
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+
+
+============================================================
+FILE: JARVIS-AI/settings.gradle.kts
+============================================================
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "JARVIS-AI"
+include(":app")
+
