@@ -1,0 +1,192 @@
+package com.jarvis.ai.ui
+
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+private val Cyan = Color(0xFF4FD8FF)
+private val Purple = Color(0xFF9B6BFF)
+private val CardBg = Color(0xFF0E1636)
+private val CardBorder = Color(0xFF2A3A7A)
+private val TextMain = Color(0xFFE8EEFF)
+private val TextMuted = Color(0xFF9FB0E0)
+
+@Composable
+fun JarvisHomeScreen() {
+    var listening by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(Color(0xFF1B2C78), Color(0xFF070B1F)),
+                    center = Offset(500f, 300f),
+                    radius = 1400f
+                )
+            )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text("হ্যালো!", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Text("আজ কী করতে চান?", color = TextMuted, fontSize = 16.sp)
+            }
+
+            AvatarView()
+
+            InfoCard {
+                Text(
+                    "শুভ সকাল! আজ ৩টি কাজ আছে।",
+                    color = TextMain, fontSize = 16.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            InfoCard {
+                Text("আজকের শিডিউল", color = TextMuted, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                ScheduleRow("১০:০০", "মিটিং")
+                ScheduleRow("২:০০", "ব্যাংকে যাওয়া")
+                ScheduleRow("রাত", "বিল দেওয়ার শেষ দিন")
+            }
+
+            Spacer(Modifier.height(8.dp))
+            MicButton(listening = listening, onClick = { listening = !listening })
+            Text(
+                if (listening) "শুনছি..." else "বলতে ট্যাপ করুন",
+                color = TextMuted, fontSize = 15.sp
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun InfoCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(CardBg)
+            .border(1.dp, CardBorder, RoundedCornerShape(18.dp))
+            .padding(16.dp),
+        content = content
+    )
+}
+
+@Composable
+private fun ScheduleRow(time: String, title: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(time, color = Cyan, fontWeight = FontWeight.Bold, modifier = Modifier.width(64.dp))
+        Text(title, color = TextMain)
+    }
+}
+
+@Composable
+private fun AvatarView() {
+    val transition = rememberInfiniteTransition(label = "avatar")
+    val glow by transition.animateFloat(
+        initialValue = 0.4f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "glow"
+    )
+    Canvas(modifier = Modifier.size(200.dp)) {
+        val c = center
+        val r = size.minDimension / 2
+        drawCircle(Cyan.copy(alpha = glow * 0.6f), radius = r - 2f, style = Stroke(3f))
+        drawCircle(Purple.copy(alpha = 0.7f), radius = r * 0.85f, style = Stroke(2f))
+        drawCircle(Color(0xFF0A1230), radius = r * 0.82f)
+        drawArc(
+            brush = Brush.verticalGradient(listOf(Color(0xFFBFF3FF), Color(0xFF2F8CFF))),
+            startAngle = 180f, sweepAngle = 180f, useCenter = true,
+            topLeft = Offset(c.x - r * 0.55f, c.y + r * 0.25f),
+            size = Size(r * 1.1f, r * 0.9f), alpha = 0.85f
+        )
+        drawCircle(
+            Brush.radialGradient(
+                listOf(Color(0xFFBFF3FF), Color(0xFF2F8CFF)),
+                center = Offset(c.x, c.y - r * 0.25f), radius = r * 0.45f
+            ),
+            radius = r * 0.36f, center = Offset(c.x, c.y - r * 0.12f)
+        )
+        drawCircle(Color(0xFF0A1230), radius = 5f, center = Offset(c.x - r * 0.13f, c.y - r * 0.16f))
+        drawCircle(Color(0xFF0A1230), radius = 5f, center = Offset(c.x + r * 0.13f, c.y - r * 0.16f))
+    }
+}
+
+@Composable
+private fun MicButton(listening: Boolean, onClick: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "mic")
+    val pulse by transition.animateFloat(
+        initialValue = 1f, targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulse"
+    )
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(140.dp)) {
+        if (listening) {
+            Canvas(Modifier.fillMaxSize()) {
+                drawCircle(
+                    Purple.copy(alpha = 0.5f),
+                    radius = (size.minDimension / 2) * (pulse / 1.35f),
+                    style = Stroke(4f)
+                )
+            }
+        }
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(100.dp)
+                .clip(CircleShape)
+                .background(Brush.radialGradient(listOf(Color(0xFF0A1230), Color(0xFF3A2A8A))))
+                .border(3.dp, Cyan, CircleShape)
+                .clickable(onClick = onClick)
+        ) {
+            Canvas(Modifier.size(40.dp)) {
+                val w = size.width
+                drawRoundRect(
+                    TextMain, Offset(w * 0.35f, 0f), Size(w * 0.3f, w * 0.55f),
+                    CornerRadius(w * 0.15f, w * 0.15f)
+                )
+                drawArc(
+                    TextMain, 0f, 180f, false, Offset(w * 0.2f, w * 0.2f),
+                    Size(w * 0.6f, w * 0.5f), style = Stroke(4f, cap = StrokeCap.Round)
+                )
+                drawLine(
+                    TextMain, Offset(w * 0.5f, w * 0.7f), Offset(w * 0.5f, w * 0.95f),
+                    strokeWidth = 4f, cap = StrokeCap.Round
+                )
+            }
+        }
+    }
+}
